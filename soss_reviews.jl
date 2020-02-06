@@ -183,7 +183,7 @@ sum.(p)
 
 ## Turing cumulative model
 
-using Turing2MonteCarloMeasurements
+using Turing2MonteCarloMeasurements, NamedTupleTools
 Turing.@model cum_model(indv, Rv) = begin
     rσ ~ Gamma(0.2)
     article_pop_variance ~ truncated(Normal(1., 0.5), 0, 100)
@@ -193,7 +193,7 @@ Turing.@model cum_model(indv, Rv) = begin
     z                  = Vector{Real}(undef, length(indv))
     pred               = Vector{Real}(undef, length(indv))
     # Rv                 = Vector{Real}(undef, length(indv))
-    diffcp             = Vector{Real}(undef, nscores-1)
+    # diffcp             = Vector{Real}(undef, nscores-2)
     offset             = (abs(min_score)) + 1
 
     for i = 1:nr
@@ -203,36 +203,48 @@ Turing.@model cum_model(indv, Rv) = begin
     for j = 1:na
         true_article_score[j] ~ Normal(0,article_pop_variance)
     end
-    for i = 1:nscores-1
-        # i == 1 ? truncated(Normal(1,0.3), 0, 3) : Normal(1,0.15)
-        diffcp[i] ~ Normal(1,0.15)
-    end
-    cutpoints = cumsum(diffcp)
+    # for i = 1:length(diffcp)
+    #     diffcp[i] ~ Normal(0,0.05)
+    # end
+    # cutpoints = similar(diffcp, nscores-1)
+    # cutpoints[1] ~ Normal(1,0.12)
+    # for i = 2:length(cutpoints)
+    #     cutpoints[i] = cutpoints[i-1] + exp(diffcp[i-1])
+    # end
+    diffcp ~ Dirichlet(nscores+1,5)
+    cutpoints = (cumsum(diffcp)*nscores + reverse(nscores .- cumsum(reverse(diffcp))*nscores)) ./ 2
     for ind in eachindex(indv)
         i,j = indv[ind]
         z[ind] ~ Normal(0,1)
         pred[ind] = true_article_score[j] + reviewer_gain[i]*true_article_score[j] + reviewer_noise[i]*z[ind] + offset
-        Rv[ind] ~ OrderedLogistic(pred[ind],cutpoints)
+        Rv[ind] ~ OrderedLogistic(pred[ind],cutpoints[2:end-1])
     end
+    @namedtuple(Rv, true_article_score, cutpoints, reviewer_gain)
 end;
+
+prior = cum_model(indv, Union{Int,Missing}[fill(missing, length(indv))...])
+truth = prior()
+prior_sample = [prior() for _ in 1:1000] |> particles
+plot(prior_sample.Rv)
+histogram(reduce(union,prior_sample.Rv))
 
 m = cum_model(indv, Rv .+ (abs(min_score)+1))
 
-chain = sample(m, HMC(0.03, 10), 2000)
+chain = sample(m, HMC(0.03, 10), 1500)
 p = Particles(chain, crop=500)
-describe(chain)
+# describe(chain)
 
-figs = map((:true_article_score,)) do s
-    bar(@eval($s))
+figs = map((:true_article_score,:reviewer_gain)) do s
+    bar(getproperty(truth, s))
     prop = getproperty(p, s)
     errorbarplot!(1:length(prop), prop, seriestype=:scatter, legend=false, title=string(s), m=2)
 end
 plot(figs...)
 
-truth = (true_article_score=article_score, reviewer_bias=reviewer_bias, Rv=Rv)
-
+# truth = (true_article_score=article_score, reviewer_bias=reviewer_bias, Rv=Rv)
+offset             = (abs(min_score)) + 1
 observed_score = map(1:na) do j
-    mean([truth.Rv[ind] for ind in eachindex(indv) if indv[ind][2] == j])
+    mean([truth.Rv[ind]-offset for ind in eachindex(indv) if indv[ind][2] == j])
 end
 
 
@@ -244,7 +256,10 @@ errorbarplot!(1:na, p.true_article_score, seriestype=:scatter, lab="model", m=(2
 ##
 pp = map(1:length(indv)) do ind
     i,j = indv[ind]
-    p.true_article_score[j] + p.reviewer_gain[i]*p.true_article_score[j]
+    p.true_article_score[j] + p.reviewer_gain[i]*p.true_article_score[j] +
 end
 scatter(lq)
 errorbarplot!(1:length(pp), pp, seriestype=:scatter)
+
+using MCMCChains, StatsPlots
+plot(chain)
