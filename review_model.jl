@@ -1,13 +1,13 @@
-# This is an experiment on using probabilistic programming (using Soss.jl and Turing.jl) to calibrate review scores given by `na` reviewers to `na` articles submitted to, e.g., a conference for publication. Each reviewer assigns each article a score between 1 and 11 (categories start from 1, otherwise it would have been 0-10). We assume there are no missing reviews for simplicity. The review scores are stored in the vector `Rv`. The reviewers might not use a "metric scale" for their scores, i.e., difference between score 3-4 might be larger or smaller than the difference between 9-10. Du to this, we make use of ordinal regression, where we estimate the scale the reviewers are using. In reality, we might want to have a separate scsale for each reviewer, but the number of reviews per reviewer reqiured to estimate this accurately would be too high, so we settle for one single scale for all of them.
+# This is an experiment on using probabilistic programming (using Soss.jl and Turing.jl) to calibrate review scores given by `na` reviewers to `na` articles submitted to, e.g., a conference for publication. Each reviewer assigns each article a score between 1 and 5. We assume there are no missing reviews for simplicity. The review scores are stored in the vector `Rv`. The reviewers might not use a "metric scale" for their scores, i.e., difference between score 3-4 might be larger or smaller than the difference between 9-10. Du to this, we make use of ordinal regression, where we estimate the scale the reviewers are using. In reality, we might want to have a separate scsale for each reviewer, but the number of reviews per reviewer reqiured to estimate this accurately would be too high, so we settle for one single scale for all of them.
 cd(@__DIR__)
 using Pkg
 pkg"activate ."
 using Soss, MonteCarloMeasurements, Distributions, Turing, Plots, LinearAlgebra, Statistics
 default(size=(500,300))
-nr = 10  # Number of reviewers
-na = 10 # Number of articles
+nr = 12  # Number of reviewers
+na = 15 # Number of articles
 indv = [(i,j) for i in 1:nr, j in 1:na]
-nscores = 11;
+nscores = 5;
 
 # Below, we define some helper functions
 function Distributions.cdf(R::AbstractArray,mi=minimum(skipmissing(R)),ma=maximum(skipmissing(R)))
