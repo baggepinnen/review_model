@@ -1,1 +1,1 @@
-See review_model.html or review_model.pdf
+See [review_model.html](https://htmlpreview.github.io/?https://github.com/baggepinnen/review_model/blob/master/review_model.html) or [review_model.pdf](https://github.com/baggepinnen/review_model/blob/master/review_model.pdf)
