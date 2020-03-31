@@ -2,12 +2,14 @@
 cd(@__DIR__)
 using Pkg
 pkg"activate ."
-using Soss, MonteCarloMeasurements, Distributions, Turing, Plots, LinearAlgebra, Statistics
+using Soss, MonteCarloMeasurements, Distributions, Plots, LinearAlgebra, Statistics, Turing, NamedTupleTools
 default(size=(500,300))
-nr = 12  # Number of reviewers
+nr = 10  # Number of reviewers
 na = 15 # Number of articles
 indv = [(i,j) for i in 1:nr, j in 1:na]
-nscores = 5;
+max_score = 5
+min_score = 1
+nscores = max_score-min_score+1;
 
 # Below, we define some helper functions
 function Distributions.cdf(R::AbstractArray,mi=minimum(skipmissing(R)),ma=maximum(skipmissing(R)))
@@ -40,55 +42,67 @@ function logodds(R::AbstractArray)
 end;
 
 # This function accepts a vector of differences between cutpoints and form the cumulative sum in both directions to form the final cutpoints. The reason for calculating the cumulative sum in both directions is that the variance grows as you add uncertain variables, and with this approach, the variance will be highest in the middle, which agrees with my intuition on how flexible the cutpoints should be.
-cumcut(diffcp) = ((cumsum(diffcp) + reverse(1  .- cumsum(reverse(diffcp)))) ./ 2)*12 .- 6;
+cumcut(diffcp) = ((cumsum(diffcp) + reverse(1  .- cumsum(reverse(diffcp)))) ./ 2)*max_score .- nscores/2;
 
 # # Soss
 # First out is the Soss model
 cum_model = Soss.@model indv begin
-    rσ ~ Gamma(0.2) # The variance of the noise each reviewr has in their review is drawn from a common pool
-    article_pop_std ~ truncated(Normal(1., 0.1), 0, 100) # The population of all article scores has a common variance
-    reviewer_noise ~ truncated(Normal(rσ, 0.1), 0, 3) |> iid(nr) # Different reviewer have different noise variances
-    reviewer_gain ~ Normal(1, 0.15) |> iid(nr) # Each reviewer has a unique gain, i.e., when an article gets better or worse, the reviewer adjusts the score more or less.
+    article_pop_std ~ truncated(Normal(0.5, 0.1), 0, 100) # The population of all article scores has a common variance
+    reviewer_gain ~ truncated(Normal(1, 0.5), 0.1, 3) |> iid(nr) # Each reviewer has a unique gain, i.e., when an article gets better or worse, the reviewer adjusts the score more or less.
     article_score ~ Normal(0,article_pop_std) |> iid(na) # The true, calibrated article score
     diffcp ~ Dirichlet(nscores-1,50) # Vector of differences between cutpoints
     cutpoints = cumcut(diffcp)
+    # μ = (max_score-min_score)/2 + 1
 
-    z ~ Normal(0,1) |> iid(length(indv)) # Vector of noise components, one for each review
     Rv ~ For(length(indv)) do ind
         i,j = indv[ind]
-        pred = article_score[j] + reviewer_noise[i]*z[ind] + reviewer_gain[i]*article_score[j] # linear model predicting the log-odds of the review score, this will be roughly between -4 and 4
+        pred = article_score[j] + reviewer_gain[i]*article_score[j] # linear model predicting the log-odds of the review score, this will be roughly between -4 and 4
         OrderedLogistic(pred,cutpoints) # The observed review score is an ordered logistic variable. This transform the `pred` to a categorical value between 1 and 10
     end
 end;
 
+# We sample some points from the prior and see what it thinks about the world of reviews
+prior_sample = rand(cum_model(indv=indv), 1000) # rand(::SossModel) does not seem to accept a number of samples
+prior_sample = delete.(prior_sample, :indv) |> particles
+errorbarplot(prior_sample.Rv, title="Review score prior") |> display
+# We can visualize what the prior considers possible cutpoints for the log-odds
+mcplot(prior_sample.cutpoints, title="Cutpoints prior") |> display
+# We can also visualize the prior distribution over observed review scores and log-odds
+histogram(reduce(union,prior_sample.Rv), title="Samples of review scores from prior", xlabel="Review score")
+#
+
+
 # below, we sample one data point from the model and call this the "truth".
-s = [rand(cum_model(indv=indv)) for _ in 1:1000] # rand(::SossModel) does not seem to accept a number of samples
 truth = rand(cum_model(indv=indv));
 
 # We now perform inference on the model using as observed variables the review scores from the "truth"
-@time post = dynamicHMC(cum_model(indv=indv), (Rv=truth.Rv,), 1000);
+@time post = dynamicHMC(cum_model(indv=indv), (Rv=truth.Rv,), 4200);
 # This call takes a long time. It seems to be taking long time before it even starts to sample.
-p = particles(post[200:end]); # Convert posterior to `Particles`
+p = particles(post[201:end]); # Convert posterior to `Particles`
 
 # We now visualize the inferred articles scores and reviewer gains and compare the posterior to what we know are the generating parameters from the `truth`
 figs = map((:reviewer_gain, :article_score)) do s
     bar(getproperty(truth, s))
     prop = getproperty(p, s)
-    errorbarplot!(1:length(prop), prop, seriestype=:scatter, legend=false, title=string(s), m=2)
+    errorbarplot!(prop, seriestype=:scatter, legend=false, title=string(s), m=2)
 end
 plot(figs...)
 # using Soss, there is a clear indication that the model has learned at least something about the reviewer gains, even though the variance is high.
 
 # We can calculate the log-odds of the observed scores for each article and compare this to the models predictions
-lo = logodds(truth.Rv)
+# lo = logodds(truth.Rv)
 observed_score = map(1:na) do j
-    median([lo[ind] for ind in eachindex(indv) if indv[ind][2] == j])
+    mean([truth.Rv[ind] for ind in eachindex(indv) if indv[ind][2] == j])
 end
+observed_score .-= mean(observed_score)
 
 function print_rank_results(truth, p, observed_score)
 
     println("Percentage of correct rank from model $(mean(sortperm(truth.article_score) .==  sortperm(mean.(p.article_score))))")
     println("Percentage of correct rank from observed score $(mean(sortperm(truth.article_score) .==  sortperm(observed_score)))")
+
+    println("Percentage of top 50% correct from model $(mean(sortperm(truth.article_score)[1:end÷2] .∈  Ref(sortperm(mean.(p.article_score))[1:end÷2])))")
+    println("Percentage of top 50% correct from observed score $(mean(sortperm(truth.article_score)[1:end÷2] .∈  Ref(sortperm(observed_score)[1:end÷2])))")
 
     println("Rankdist between correct rank and model $(rankdist(sortperm(truth.article_score),  sortperm(mean.(p.article_score))))") # `rankdist` is a distance measure I cooked up to try to measure the permutation distance between two rank vectors.
     println("Rankdist between correct rank and observed score $(rankdist(sortperm(truth.article_score),  sortperm(observed_score)))")
@@ -100,25 +114,20 @@ print_rank_results(truth, p, observed_score)
 # # Turing
 # We now perform the same exercise with Turing, the model should be exactly the same with the same numerical values for the parameters
 
-using Turing2MonteCarloMeasurements, NamedTupleTools
+using Turing, Turing2MonteCarloMeasurements, NamedTupleTools
 Turing.@model cum_model(indv, Rv, ::Type{T}=Float64) where {T} = begin
-    rσ ~ Gamma(0.2)
     article_pop_std ~ truncated(Normal(1., 0.1), 0, 100)
     reviewer_noise     = Vector{T}(undef, nr)
     pred               = Vector{T}(undef, length(indv))
 
-    for i = 1:nr
-        reviewer_noise[i] ~ truncated(Normal(rσ, 0.1), 0, 3)
-    end
     reviewer_gain ~ MvNormal(fill(1,nr), 0.15^2)
     article_score ~ MvNormal(zeros(na),article_pop_std^2)
 
     diffcp ~ Dirichlet(nscores-1,50)
     cutpoints = cumcut(diffcp)
-    z ~ MvNormal(zeros(length(indv)),1)
     for ind in eachindex(indv)
         i,j = indv[ind]
-        pred[ind] = article_score[j] + reviewer_noise[i]*z[ind] + reviewer_gain[i]*article_score[j]
+        pred[ind] = article_score[j] + reviewer_gain[i]*article_score[j]
         Rv[ind] ~ OrderedLogistic(pred[ind],cutpoints)
     end
     @namedtuple(Rv, article_score, cutpoints, reviewer_noise, reviewer_gain, pred, diffcp, z, rσ, article_pop_std)
@@ -137,8 +146,8 @@ histogram(reduce(union,prior_sample.Rv), title="Samples of review scores from pr
 histogram(reduce(union,prior_sample.pred), title="Samples of log-odds predictions from prior")
 # We now sample from the posterior using Turing
 m = cum_model(indv, Int.(truth.Rv))
-@time chain = sample(m, HMC(0.03, 7), 1200) # NUTS does not work
-p = Particles(chain, crop=200);
+@time chain = sample(m, HMC(0.03, 7), 5000) # NUTS does not work
+p = Particles(chain, crop=1000);
 # Turing samples *much* faster that Soss for this model
 dc = describe(chain, digits=3, q=[0.1, 0.5, 0.9])
 #
@@ -163,51 +172,6 @@ observed_score = map(1:na) do j
     median([lo[ind] for ind in eachindex(indv) if indv[ind][2] == j])
 end
 print_rank_results(truth, p, observed_score)
-
-
-# # MAP
-# using Turing and Optim, we perform MAP estimation to try to figure out why the inference above is shaky
-function get_nlogp(model)
-    vi = Turing.VarInfo(model)
-    function nlogp(sm)
-        spl = Turing.SampleFromPrior()
-        new_vi = Turing.VarInfo(vi, spl, sm)
-        try # If the call below fails, we just return a large value
-            model(new_vi, spl)
-        catch
-            return 1e4
-        end
-        -new_vi.logp
-    end
-
-    return nlogp
-end
-
-# Define our data points.
-model = cum_model(indv, truth.Rv)
-nlogp = get_nlogp(model)
-
-
-# We set the initial parameter estimate the true generating parameters
-using Optim
-p0 = [truth.rσ;
-truth.article_pop_std;
-truth.reviewer_noise;
-truth.reviewer_gain;
-truth.article_score;
-truth.diffcp;
-truth.z]
-
-nlogp(p0)
-result = Optim.optimize(nlogp, p0, GradientDescent(), Optim.Options(store_trace=true, show_trace=false, show_every=1, iterations=3000, allow_f_increases=false, time_limit=300, x_tol=0, f_tol=0, g_tol=1e-8, f_calls_limit=0, g_calls_limit=0), autodiff=:forward)
-
-# Using ForwardDiff we can have a look at the gradient and hessians at the solution to the optimization problem
-using ForwardDiff
-@time H = ForwardDiff.hessian(nlogp, result.minimizer)
-#
-g = ForwardDiff.gradient(nlogp, result.minimizer)
-#
-cond(H)
 
 
 #src literateweave("review_model.jl", doctype="md2pdf", latex_cmd="lualatex --output-directory=build", template="template.tpl")
